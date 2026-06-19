@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <circle cx="50" cy="50" r="48" fill="#003087" />
+  <!-- Left wing of the T -->
+  <path d="M48 78 C48 58, 41 44, 25 38 C39 41, 44 55, 44 78 Z" fill="#ffffff" />
+  <!-- Right wing of the T -->
+  <path d="M52 78 C52 58, 59 44, 75 38 C61 41, 56 55, 56 78 Z" fill="#ffffff" />
+</svg>

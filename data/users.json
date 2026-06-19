@@ -1,0 +1,32 @@
+{
+    "admin": {
+        "username": "admin",
+        "password_hash": "3ec842eda635064d0008cb220a85e8ded749757e3f38bfebd7e4ce35b8f8b854",
+        "role": "Higher Authority",
+        "shop": null
+    },
+    "gmtata": {
+        "username": "gmtata",
+        "password_hash": "b2584a2bd05fffb9ea64691ce792cee6bce47aa6aaac9dec8cb7eb775dbf8290",
+        "role": "Higher Authority",
+        "shop": null
+    },
+    "bdtata": {
+        "username": "bdtata",
+        "password_hash": "d345188189ca708636c69db6ce3fe8606ce96a44370bf0766b0e783e279b7d7b",
+        "role": "Shop Manager",
+        "shop": "Body Shop"
+    },
+    "pstata": {
+        "username": "pstata",
+        "password_hash": "c80a433f7ca0a8bb1d0a178590d4db708a50946bcf38d1d077779e75e34cfe4a",
+        "role": "Shop Manager",
+        "shop": "Paint Shop"
+    },
+    "press": {
+        "username": "press",
+        "password_hash": "ec18c9f577f2cc02603f9386ba5d3088d946abf229e5f48c8ce44dc5e11746cf",
+        "role": "Shop Manager",
+        "shop": "Press Shop"
+    }
+}

@@ -1,10 +1,9 @@
 """
-API - SpareAI FastAPI Backend
-Run: uvicorn api:app --reload
+SpareAI FastAPI Backend — Local Data Mode
+Run: uvicorn main:app --reload
 
-Data source: OneDrive for Business (Microsoft Graph API)
-The Excel file is streamed in-memory — never downloaded to disk.
-See .env.example and SETUP_INSTRUCTIONS.md for configuration.
+Data source: local data/data.xlsx (loaded once on startup).
+No Google Sheets, no periodic sync, no dynamic data updates.
 """
 
 import json, os
@@ -13,39 +12,29 @@ from datetime import date, timedelta, datetime
 import joblib
 import numpy as np
 import pandas as pd
+import asyncio
+import threading
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# ── CONFIG ────────────────────────────────────────────────
+# ── CONFIG ────────────────────────────────────────
 BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH   = os.path.join(BASE_DIR, "models", "best_model.pkl")
 ENCODER_PATH = os.path.join(BASE_DIR, "models", "encoder.pkl")
 META_PATH    = os.path.join(BASE_DIR, "models", "meta.json")
+DATA_PATH    = os.path.join(BASE_DIR, "data", "data.xlsx")
 
 app = FastAPI(title="SpareAI — Tata Motors", version="5.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-
-import services as _api_pkg  # package __init__ — shared namespace for _df_cache
-
-from services.google_sheets_sync import router as sheets_sync_router
-from services.google_sheets_config import router as sheets_config_router
-from services.export import router as export_router
-from services.data_entry import router as data_entry_router
-
-app.include_router(sheets_sync_router)
-app.include_router(sheets_config_router)
-app.include_router(export_router)
-app.include_router(data_entry_router)
-
-from services.periodic_tasks import start_periodic_tasks
-
-@app.on_event("startup")
-async def launch_background():
-    start_periodic_tasks(app)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ── LOCAL DATA ENGINE ─────────────────────────────────────
-DATA_PATH = os.path.join(BASE_DIR, "data", "data.xlsx")
 _df_cache = None
 _last_loaded_time = None
 
@@ -54,27 +43,33 @@ def load_local_data():
     global _df_cache, _last_loaded_time
     print(f"Loading data.xlsx from {DATA_PATH}...")
     if not os.path.exists(DATA_PATH):
-        raise FileNotFoundError(f"Local data file not found at {DATA_PATH}")
-    sheets = pd.read_excel(DATA_PATH, sheet_name=None, engine="openpyxl")
-    df = pd.concat(sheets.values(), ignore_index=True)
-    df.columns = df.columns.str.strip()
-    if "pstng date" in df.columns:
-        df["pstng date"] = pd.to_datetime(df["pstng date"], errors="coerce")
-    _df_cache = df
-    _last_loaded_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    # Sync into the api package namespace so api.db / api.periodic_tasks can read it
-    _api_pkg._df_cache = df
-    _api_pkg._last_loaded_time = _last_loaded_time
-    print(f"Loaded {len(_df_cache)} rows from local Excel.")
+        print(f"Local data file not found at {DATA_PATH}, starting empty.")
+        return
+    try:
+        sheets = pd.read_excel(DATA_PATH, sheet_name=None, engine="openpyxl")
+        df = pd.concat(sheets.values(), ignore_index=True)
+        df.columns = df.columns.str.strip()
+        if "pstng date" in df.columns:
+            df["pstng date"] = pd.to_datetime(df["pstng date"], errors="coerce")
+        _df_cache = df
+        _last_loaded_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        # Also update the services package cache reference
+        import services as _api_pkg
+        _api_pkg._df_cache = df
+        _api_pkg._last_loaded_time = _last_loaded_time
+        print(f"✅ Loaded {len(_df_cache)} rows from local data.xlsx")
+    except Exception as e:
+        print(f"⚠️ Failed to load local data: {e}")
 
-# Initial load
-load_local_data()
+# Load data once at startup
+@app.on_event("startup")
+async def startup_event():
+    load_local_data()
 
 from services.db import get_dataframe_sync
 
-# Convenience accessor — always returns the cached in-memory DataFrame
 def _get_df() -> pd.DataFrame:
-    # Use the abstract data layer
+    """Convenience accessor — always returns the cached in-memory DataFrame."""
     return get_dataframe_sync()
 
 # ── MODEL LOAD ────────────────────────────────────────────
@@ -84,10 +79,10 @@ le    = None
 meta  = {}
 FEATURES = []
 
-def reload_data_and_model():
-    """Hot-reload ML model from disk (called after retraining completes)."""
+def reload_data_and_model_sync():
+    """Hot-reload ML model from disk."""
     global model, le, meta, FEATURES
-    print("Hot-reloading ML model...")
+    print("Hot-reloading ML model in background...")
     try:
         with open(META_PATH) as f:
             meta = json.load(f)
@@ -98,9 +93,12 @@ def reload_data_and_model():
         model = joblib.load(MODEL_PATH)
         le    = joblib.load(ENCODER_PATH)
         df_now = _get_df()
-        print(f"✅ {meta.get('best_model', 'unknown')}  MAE:{meta.get('best_mae')}  Rows:{len(df_now)}")
+        print(f"✅ ML Model loaded. {meta.get('best_model', 'unknown')}  MAE:{meta.get('best_mae')}  Rows:{len(df_now)}")
     except FileNotFoundError:
         print("⚠️ Model/encoder not found — ML forecasts will use fallback until trained")
+
+def reload_data_and_model():
+    threading.Thread(target=reload_data_and_model_sync, daemon=True).start()
 
 reload_data_and_model()
 
@@ -167,9 +165,11 @@ def total_consumption_by_shop(year=None):
         .reset_index(drop=True)
     )
 
-def getTopMaterials(year=None, limit=10):
+def getTopMaterials(year=None, limit=10, shop=None):
     """Single source of truth for material ranking."""
     year_df, _ = filter_by_year(year)
+    if shop and "Shop" in year_df.columns:
+        year_df = year_df[year_df["Shop"] == shop]
     result = (
         year_df.groupby("Material", as_index=False)
         .agg(total_quantity=("Quantity", "sum"))
@@ -304,7 +304,6 @@ def validate_dashboard_metrics(year=None, shop=None):
     procurement = []
     forecast_total = 0.0
     procurement_total = 0
-    # Iterate over unique (Material, Shop) pairs so multi-shop materials get separate entries
     if "Shop" in df.columns:
         mat_shop_pairs = df[["Material", "Shop"]].drop_duplicates().values.tolist()
     else:
@@ -383,11 +382,8 @@ def get_material_meta(material: str, shop: str = None) -> dict:
             mdf = shop_mdf
     if mdf.empty:
         return {}
-    
-    # FIX 1: Enforce chronological timeline sort to secure the absolute latest row snapshot
     mdf = mdf.sort_values("pstng date")
     row = mdf.iloc[-1]
-    
     abc       = str(row.get("ABC_Class", "C")).strip().upper() if "ABC_Class" in mdf.columns else "C"
     inventory = int(row.get("Inventory_Qty", 1500))            if "Inventory_Qty" in mdf.columns else 1500
     val_type  = int(row.get("Val Type", 1))                    if "Val Type" in mdf.columns else 1
@@ -490,6 +486,17 @@ def get_risk(predicted, inventory, abc):
         return "High" if ratio > 0.4 else "Medium"
     return "High" if ratio > 0.6 else "Medium"
 
+import functools
+
+# Global in-memory cache dictionary to store recommendations
+_recommendation_cache = {}
+
+def clear_recommendation_cache():
+    """Clear the pre-computed recommendations cache."""
+    global _recommendation_cache
+    _recommendation_cache.clear()
+    print("Recommendation cache cleared.")
+
 def recommendation_engine(material: str, horizon_days: int = 30, shop: str = None):
     """
     Single source of truth for all forecasts across the platform.
@@ -497,6 +504,15 @@ def recommendation_engine(material: str, horizon_days: int = 30, shop: str = Non
     except: fallback_forecast() — hidden from business users
     When shop is specified, returns shop-specific metadata/inventory.
     """
+    cache_key = (material, horizon_days, shop)
+    if cache_key in _recommendation_cache:
+        return _recommendation_cache[cache_key]
+
+    res = _recommendation_engine_uncached(material, horizon_days, shop)
+    _recommendation_cache[cache_key] = res
+    return res
+
+def _recommendation_engine_uncached(material: str, horizon_days: int = 30, shop: str = None):
     df = _get_df()
     mdf = df[df["Material"] == material].copy()
     if mdf.empty:
@@ -541,7 +557,6 @@ def recommendation_engine(material: str, horizon_days: int = 30, shop: str = Non
     fc_60d = round(monthly_fc[0] + monthly_fc[1], 2)
     fc_90d = round(monthly_fc[0] + monthly_fc[1] + monthly_fc[2], 2)
 
-    # FIX 2: Migrate completely to AI Demand Velocity. Abandon historical runout math.
     predicted_monthly_demand = predicted
     avg_daily         = max(predicted_monthly_demand / 30.0, 0.01)
     days_until_runout = int(inventory / avg_daily)
@@ -620,7 +635,7 @@ def recommendation_engine(material: str, horizon_days: int = 30, shop: str = Non
 # ── AUTH & USER SYSTEM ──────────────────────────────────
 import hashlib
 
-USERS_FILE = os.path.join(BASE_DIR, "data", "users.json")
+USERS_FILE  = os.path.join(BASE_DIR, "data", "users.json")
 CONFIG_FILE = os.path.join(BASE_DIR, "data", "config.json")
 
 def hash_password(password: str, salt: str = "spareai_salt_12345") -> str:
@@ -654,9 +669,7 @@ def save_users(users: dict):
 def load_config() -> dict:
     if not os.path.exists(CONFIG_FILE):
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-        default_config = {
-            "budget_passcode": "1234"
-        }
+        default_config = {"budget_passcode": "1234"}
         with open(CONFIG_FILE, 'w') as f:
             json.dump(default_config, f, indent=4)
         return default_config
@@ -702,7 +715,6 @@ def signup(req: SignupRequest):
         raise HTTPException(400, "Password must be at least 4 characters")
     if username_clean in users:
         raise HTTPException(400, "Username already exists")
-    
     users[username_clean] = {
         "username": username_clean,
         "password_hash": hash_password(req.password),
@@ -757,11 +769,9 @@ def set_budget_passcode(req: PasscodeUpdateRequest):
     user_data = users[username_clean]
     if user_data["role"] != "Higher Authority":
         raise HTTPException(403, "Only Higher Authorities can change the budget passcode")
-    
     cfg = load_config()
     if cfg.get("budget_passcode", "1234") != req.current_passcode:
         raise HTTPException(400, "Incorrect current passcode")
-    
     cfg["budget_passcode"] = req.new_passcode.strip()
     save_config(cfg)
     return {"status": "success", "message": "Budget passcode changed successfully"}
@@ -772,7 +782,7 @@ def set_budget_passcode_alias(req: PasscodeUpdateRequest):
 
 @app.get("/")
 def home():
-    return {"status": "running", "version": "4.0.0"}
+    return {"status": "running", "version": "5.0.0", "data_source": "local Excel (data/data.xlsx)"}
 
 @app.get("/forecast-engine")
 def forecast_engine():
@@ -810,7 +820,7 @@ def plant_summary(year: Optional[int] = None, shop: Optional[str] = None):
             year_df = year_df[year_df["Shop"] == shop]
         if "Shop" in df.columns:
             df = df[df["Shop"] == shop]
-            
+
     total_materials = int(year_df["Material"].nunique())
     total_records   = int(len(year_df))
     total_consumed  = round(float(year_df["Quantity"].sum()), 2)
@@ -831,24 +841,13 @@ def plant_summary(year: Optional[int] = None, shop: Optional[str] = None):
     if "Inventory_Qty" in df.columns:
         total_inventory = int(df.sort_values("pstng date").drop_duplicates("Material", keep="last")["Inventory_Qty"].sum())
 
-    # Calculate year metadata based on filtered year_df
     if year_df.empty:
-        year_meta = {
-            "year": selected_year,
-            "months_available": 0,
-            "coverage_pct": 0.0,
-            "is_ytd": True,
-        }
+        year_meta = {"year": selected_year, "months_available": 0, "coverage_pct": 0.0, "is_ytd": True}
     else:
         months_available = int(year_df["pstng date"].dt.month.nunique())
         is_ytd = months_available < 12
         coverage_pct = round(months_available / 12 * 100, 1)
-        year_meta = {
-            "year": selected_year,
-            "months_available": months_available,
-            "coverage_pct": coverage_pct,
-            "is_ytd": is_ytd,
-        }
+        year_meta = {"year": selected_year, "months_available": months_available, "coverage_pct": coverage_pct, "is_ytd": is_ytd}
 
     return {
         "year":             selected_year,
@@ -865,13 +864,11 @@ def plant_summary(year: Optional[int] = None, shop: Optional[str] = None):
         "shop_consumption": shop_summary,
     }
 
-# Duplicate @app.get("/procurement-summary") removed – kept single definition below
 @app.get("/procurement-summary")
 def procurement_summary(shop: Optional[str] = None):
     df = _get_df()
     if shop and "Shop" in df.columns:
         df = df[df["Shop"] == shop]
-    # Iterate over unique (Material, Shop) pairs so multi-shop materials get separate entries
     if "Shop" in df.columns:
         mat_shop_pairs = df[["Material", "Shop"]].drop_duplicates().values.tolist()
     else:
@@ -1012,10 +1009,7 @@ def history(material: str, shop: Optional[str] = None):
 
 @app.get("/shop-predictions")
 def shop_predictions(horizon: int = 30, shop: Optional[str] = None):
-    """
-    Per-shop, per-material forecasts via recommendation_engine() — single ML source.
-    Recursive multi-step for 30/60/90-day horizons.
-    """
+    """Per-shop, per-material forecasts via recommendation_engine()."""
     df = _get_df()
     if "Shop" in df.columns:
         if shop:
@@ -1040,37 +1034,27 @@ def shop_predictions(horizon: int = 30, shop: Optional[str] = None):
             days_stock   = rec["lead_time"]["days_to_runout"]
             urgency      = "Critical" if days_stock <= horizon else ("Watch" if days_stock <= horizon * 1.5 else "OK")
             results.append({
-                "material": material,
-                "shop": shop_val,
-                "machine": machine,
-                "abc": abc,
-                "stock": stock,
-                "forecast_qty": fc_qty,
-                "gap": round(gap, 0),
-                "days_stock": days_stock,
-                "safety_stock": int(safety_stock),
-                "order_needed": order_needed,
+                "material": material, "shop": shop_val, "machine": machine,
+                "abc": abc, "stock": stock, "forecast_qty": fc_qty,
+                "gap": round(gap, 0), "days_stock": days_stock,
+                "safety_stock": int(safety_stock), "order_needed": order_needed,
                 "forecast_source": "AI Forecast Engine",
                 "monthly_forecasts": rec["forecast"]["monthly_forecasts"],
                 "order_formula": "max(forecast_qty - stock, 0) + safety_stock",
-                "lead_time": lead_time,
-                "is_import": is_import,
-                "urgency": urgency,
-                "risk": rec["risk"],
-                "developer": rec.get("developer", {}),
+                "lead_time": lead_time, "is_import": is_import, "urgency": urgency,
+                "risk": rec["risk"], "developer": rec.get("developer", {}),
             })
         except Exception:
             pass
-
-    results.sort(key=lambda x: {"Critical":0,"Watch":1,"OK":2}.get(x["urgency"],3))
+    results.sort(key=lambda x: {"Critical": 0, "Watch": 1, "OK": 2}.get(x["urgency"], 3))
     return results
 
 @app.get("/dashboard-validation")
 def dashboard_validation(year: Optional[int] = None, shop: Optional[str] = None):
     return validate_dashboard_metrics(year, shop=shop)
 
-# ── LOCAL DATA REFRESH & RETRAIN ──────────────────────────
-_retrain_running = False
+# ── LOCAL DATA STATUS & RETRAIN ───────────────────────────
+_retrain_running   = False
 _retrain_last_time = None
 _retrain_last_error = None
 
@@ -1110,35 +1094,31 @@ def local_force_refresh_task():
     except Exception as e:
         print(f"Force refresh failed: {e}")
 
-@app.get("/sync/status")
-def sync_status_endpoint():
-    """Returns the status of the local data file and loading process."""
+@app.get("/data/status")
+def data_status():
+    """Returns the status of the local data file."""
     file_size = 0
     file_modified = "unknown"
     if os.path.exists(DATA_PATH):
         file_size = os.path.getsize(DATA_PATH)
         file_modified = datetime.fromtimestamp(os.path.getmtime(DATA_PATH)).strftime("%Y-%m-%d %H:%M:%S")
     return {
-        "status": "synced" if _df_cache is not None else "error",
-        "last_sync_time": _last_loaded_time,
-        "last_modified_onedrive": file_modified,
-        "last_etag": "local_disk",
-        "sync_count": 1,
-        "last_error": None,
+        "status": "loaded" if _df_cache is not None else "not_loaded",
+        "data_source": "local Excel (data/data.xlsx)",
+        "last_loaded": _last_loaded_time,
+        "file_modified": file_modified,
+        "file_size_bytes": file_size,
         "data_rows": len(_df_cache) if _df_cache is not None else 0,
-        "refresh_interval_min": 0,
-        "auto_retrain": True,
         "retrain_running": _retrain_running,
         "retrain_last_time": _retrain_last_time,
         "retrain_last_error": _retrain_last_error,
-        "source": f"Local Machine ({DATA_PATH})",
     }
 
-@app.post("/sync/force-refresh")
-def force_refresh_endpoint(background_tasks: BackgroundTasks):
+@app.post("/data/reload")
+def data_reload(background_tasks: BackgroundTasks):
     """Reloads data.xlsx from local disk and retrains models."""
     background_tasks.add_task(local_force_refresh_task)
-    return {"status": "triggered", "message": "Local file reload and retrain started — check /sync/status for progress."}
+    return {"status": "triggered", "message": "Local file reload and retrain started — check /data/status for progress."}
 
 @app.get("/retrain/status")
 def retrain_status_endpoint():
@@ -1153,15 +1133,4 @@ def retrain_status_endpoint():
             "features":   meta.get("features", []),
         },
         "auto_retrain": True,
-    }
-
-# ── LEGACY COMPAT: keep /sync-status alias ───────────────
-@app.get("/sync-status")
-def legacy_sync_status():
-    """Legacy endpoint — use /sync/status instead."""
-    return {
-        "status": "synced" if _df_cache is not None else "error",
-        "message": f"Last loaded: {_last_loaded_time or 'never'}. Rows: {len(_df_cache) if _df_cache is not None else 0}.",
-        "stage": 1,
-        "error": None,
     }

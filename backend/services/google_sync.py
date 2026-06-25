@@ -140,7 +140,14 @@ def _build_dataframe(cfg: dict, notify: Callable) -> pd.DataFrame:
 
     # Standardize/validate core columns in consumption
     if "pstng date" in df_cons.columns:
-        df_cons["pstng date"] = pd.to_datetime(df_cons["pstng date"])
+        # Google Sheets returns dates as display text (e.g. "25.11.2016", day-first),
+        # unlike Excel which stores a real date value — parse day-first and drop rows
+        # that still fail instead of crashing the whole sync.
+        df_cons["pstng date"] = pd.to_datetime(df_cons["pstng date"], dayfirst=True, errors="coerce")
+        n_bad = int(df_cons["pstng date"].isna().sum())
+        if n_bad:
+            notify(f"  ⚠ Dropped {n_bad} row(s) with unparseable posting dates.")
+            df_cons = df_cons.dropna(subset=["pstng date"])
     else:
         raise ValueError("Missing posting date column ('pstng date') in yearly worksheets.")
 
@@ -162,26 +169,26 @@ def _build_dataframe(cfg: dict, notify: Callable) -> pd.DataFrame:
     df_inv = _read_sheet(ss, inv_name, notify)
     df_abc = _read_sheet(ss, abc_name, notify)
 
-    if df_inv is None:
-        raise ValueError(f"Required Inventory worksheet '{inv_name}' not found.")
-
-    # Standardize keys and clean columns for merge
-    df_inv.columns = df_inv.columns.str.strip()
-    rename_inv = {}
-    for col in df_inv.columns:
-        lcol = col.lower()
-        if lcol in ("partnumber", "part number", "material"):
-            rename_inv[col] = "PartNumber"
-        elif lcol in ("inventory_qty", "inventory qty", "stock", "qty"):
-            rename_inv[col] = "Inventory_Qty"
-        elif lcol in ("val type", "valtype", "valuation type"):
-            rename_inv[col] = "Val Type"
-        elif lcol == "shop":
-            rename_inv[col] = "Shop"
-        elif lcol in ("machine name", "machine", "machinename"):
-            rename_inv[col] = "Machine Name"
-    if rename_inv:
-        df_inv = df_inv.rename(columns=rename_inv)
+    if df_inv is not None:
+        # Standardize keys and clean columns for merge
+        df_inv.columns = df_inv.columns.str.strip()
+        rename_inv = {}
+        for col in df_inv.columns:
+            lcol = col.lower()
+            if lcol in ("partnumber", "part number", "material"):
+                rename_inv[col] = "PartNumber"
+            elif lcol in ("inventory_qty", "inventory qty", "stock", "qty"):
+                rename_inv[col] = "Inventory_Qty"
+            elif lcol in ("val type", "valtype", "valuation type"):
+                rename_inv[col] = "Val Type"
+            elif lcol == "shop":
+                rename_inv[col] = "Shop"
+            elif lcol in ("machine name", "machine", "machinename"):
+                rename_inv[col] = "Machine Name"
+        if rename_inv:
+            df_inv = df_inv.rename(columns=rename_inv)
+    else:
+        notify(f"  ⚠ Inventory worksheet '{inv_name}' not found — inventory levels will use fallback estimates.")
 
     if df_abc is not None:
         df_abc.columns = df_abc.columns.str.strip()
@@ -196,7 +203,9 @@ def _build_dataframe(cfg: dict, notify: Callable) -> pd.DataFrame:
             df_abc = df_abc.rename(columns=rename_abc)
 
     # Perform Merge
-    df = pd.merge(df_cons, df_inv, on="PartNumber", how="left")
+    df = df_cons
+    if df_inv is not None:
+        df = pd.merge(df, df_inv, on="PartNumber", how="left")
     if df_abc is not None:
         df = pd.merge(df, df_abc, on="PartNumber", how="left")
 
@@ -317,16 +326,11 @@ def validate_config_and_access() -> dict:
             return {"status": "error", "error": f"Failed to open Google Spreadsheet: {open_err}"}
 
         worksheets = [ws.title for ws in ss.worksheets()]
-        
-        # Check Inventory Sheet
-        inventory_name = cfg.get("inventory_sheet", "Inventory")
-        if inventory_name not in worksheets:
-            return {"status": "error", "error": f"Worksheet '{inventory_name}' not found in the spreadsheet."}
 
-        # Check ABC Master Sheet
+        # Inventory and ABC Master are optional — _build_dataframe() falls back to
+        # estimated values per-material when either sheet is absent.
+        inventory_name = cfg.get("inventory_sheet", "Inventory")
         abc_name = cfg.get("abc_sheet", "ABC Master")
-        if abc_name not in worksheets:
-            return {"status": "error", "error": f"Worksheet '{abc_name}' not found in the spreadsheet."}
 
         # Check Yearly worksheets matching YY-YY
         year_pattern = re.compile(r"^\d{2}-\d{2}$")

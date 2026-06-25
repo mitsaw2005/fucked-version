@@ -4620,43 +4620,76 @@ function MissingSection({ API, T, Card, inp, btn, currentUser, getFieldVal, show
 }
 
 /* ══════════════════════════════════════════════════════════════
-   DATA SOURCE TAB  (Google Sheets Configuration)
-══════════════════════════════════════════════════════════════ */
+   DATA SOURCE TAB  (Redesigned Administration Panel)
+   ══════════════════════════════════════════════════════════════ */
 function DataSourceTab({ API, T, Card, Section }) {
   const [cfg, setCfg] = React.useState({
-    apps_script_url: "",
-    consumption_sheet: "Consumption Data",
+    spreadsheet_id: "",
     inventory_sheet: "Inventory",
     abc_sheet: "ABC Master",
+    credentials_json: "",
+    auto_sync: true,
+    training_interval_hours: 2,
   });
+  const [status, setStatus] = React.useState(null);
+  const [logs, setLogs] = React.useState([]);
+  const [showLogs, setShowLogs] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
-  const [loadError, setLoadError] = React.useState("");
+  const [syncing, setSyncing] = React.useState(false);
+  const [training, setTraining] = React.useState(false);
+  const [testing, setTesting] = React.useState(false);
   const [saveMsg, setSaveMsg] = React.useState("");
   const [syncMsg, setSyncMsg] = React.useState("");
-  const [syncing, setSyncing] = React.useState(false);
-  const [syncProgress, setSyncProgress] = React.useState("");
-  const [showScript, setShowScript] = React.useState(false);
+  const [testResult, setTestResult] = React.useState(null);
+
+  const fetchData = async () => {
+    try {
+      const configRes = await fetch(`${API}/api/settings/google-sheets`);
+      if (configRes.ok) {
+        const configData = await configRes.json();
+        if (configData) {
+          setCfg(c => ({
+            ...c,
+            spreadsheet_id: configData.spreadsheet_id || "",
+            inventory_sheet: configData.inventory_sheet || "Inventory",
+            abc_sheet: configData.abc_sheet || "ABC Master",
+            credentials_json: configData.credentials_json || "",
+            auto_sync: configData.auto_sync !== undefined ? configData.auto_sync : true,
+            training_interval_hours: configData.training_interval_hours || 2,
+          }));
+        }
+      }
+
+      const statusRes = await fetch(`${API}/api/sync/status`);
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        if (statusData) setStatus(statusData);
+      }
+    } catch (e) {
+      console.error("Error loading config/status:", e);
+    }
+  };
 
   React.useEffect(() => {
     setLoading(true);
-    fetch(`${API}/settings/google-sheets`)
-      .then(r => { if (r.status === 404) return null; return r.json(); })
-      .then(d => { if (d) setCfg(c => ({ ...c, ...d })); })
-      .catch(e => setLoadError(e.message))
-      .finally(() => setLoading(false));
+    fetchData().finally(() => setLoading(false));
   }, []);
 
   async function saveConfig(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
     setSaveMsg("");
     try {
-      const res = await fetch(`${API}/settings/google-sheets`, {
+      const res = await fetch(`${API}/api/settings/google-sheets`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(cfg),
       });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || "Save failed"); }
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Save failed");
+      }
       setSaveMsg("✅ Configuration saved successfully!");
+      fetchData();
     } catch (e) {
       setSaveMsg(`❌ ${e.message}`);
     }
@@ -4665,308 +4698,416 @@ function DataSourceTab({ API, T, Card, Section }) {
   async function triggerSync() {
     setSyncing(true);
     setSyncMsg("");
-    setSyncProgress("Starting sync…");
     try {
-      const res = await fetch(`${API}/google-sheets-sync/manual-sync-stream`, { method: "POST" });
+      const res = await fetch(`${API}/api/google-sheets-sync/manual-sync`, { method: "POST" });
+      const data = await res.json();
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        throw new Error(err.detail || "Sync failed");
+        throw new Error(data.detail || "Sync failed");
       }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const evt = JSON.parse(line.slice(6));
-              if (evt.type === "progress") {
-                setSyncProgress(evt.message);
-              } else if (evt.type === "done") {
-                setSyncMsg(`✅ Sync complete — ${evt.rows} rows · ${(evt.columns || []).length} columns loaded from Google Sheets.`);
-                setSyncProgress("");
-              } else if (evt.type === "error") {
-                throw new Error(evt.message);
-              }
-            } catch (parseErr) {
-              if (parseErr.message && !parseErr.message.includes("JSON")) throw parseErr;
-            }
-          }
-        }
-      }
-      if (!syncMsg) {
-        // Fallback if no done event received — try the regular endpoint
-        const fallback = await fetch(`${API}/google-sheets-sync/manual-sync`, { method: "POST" });
-        const data = await fallback.json();
-        if (fallback.ok) {
-          setSyncMsg(`✅ Sync complete — ${data.rows} rows · ${(data.columns || []).length} columns loaded.`);
-        } else {
-          throw new Error(data.detail || "Sync failed");
-        }
-      }
+      setSyncMsg(`✅ Sync complete — ${data.rows} rows · ${(data.columns || []).length} columns loaded.`);
+      fetchData();
     } catch (e) {
       setSyncMsg(`❌ ${e.message}`);
-      setSyncProgress("");
     } finally {
       setSyncing(false);
     }
   }
 
-  const inp = {
-    padding: "9px 12px", border: "1px solid #d1d5db", borderRadius: 8,
-    fontSize: 13, outline: "none", width: "100%", background: "#fff",
-    color: "#111827", boxSizing: "border-box",
-  };
-  const lbl = { fontSize: 12, fontWeight: 600, color: "#6b7280", marginBottom: 5, display: "block" };
-
-  const scriptTemplate = `function doGet(e) {
-  var action = e.parameter.action;
-  var sheetName = e.parameter.sheet;
-  if (action === 'read') {
-    return ContentService.createTextOutput(JSON.stringify(readSheet(sheetName)))
-      .setMimeType(ContentService.MimeType.JSON);
+  async function triggerTrain() {
+    setTraining(true);
+    try {
+      const res = await fetch(`${API}/api/model/train?force=true`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Training failed");
+      setSyncMsg("🚀 ML retraining started in the background. Check logs or reload status to monitor progress.");
+      setTimeout(fetchData, 2000);
+    } catch (e) {
+      setSyncMsg(`❌ ML Training Error: ${e.message}`);
+    } finally {
+      setTraining(false);
+    }
   }
-  return ContentService.createTextOutput(JSON.stringify({status: "error", message: "Invalid GET action"}))
-    .setMimeType(ContentService.MimeType.JSON);
-}
 
-function doPost(e) {
-  try {
-    var postData = JSON.parse(e.postData.contents);
-    var action = postData.action;
-    if (action === 'read_sheets') {
-      var sheetNames = postData.sheets;
-      var result = {};
-      for (var i = 0; i < sheetNames.length; i++) {
-        if (sheetNames[i]) {
-          result[sheetNames[i]] = readSheet(sheetNames[i]);
-        }
+  async function triggerTest() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch(`${API}/api/sync/test`, { method: "POST" });
+      const data = await res.json();
+      if (data.status === "connected") {
+        setTestResult({ status: "success", msg: `✅ Connection test successful! Spreadsheet title: "${data.spreadsheet_title}"` });
+      } else {
+        setTestResult({ status: "error", msg: `❌ Connection test failed: ${data.error}` });
       }
-      return ContentService.createTextOutput(JSON.stringify({status: "success", data: result}))
-        .setMimeType(ContentService.MimeType.JSON);
+      fetchData();
+    } catch (e) {
+      setTestResult({ status: "error", msg: `❌ Connection test error: ${e.message}` });
+    } finally {
+      setTesting(false);
     }
-    if (action === 'write_sheet') {
-      var sheetName = postData.sheet;
-      var data = postData.data;
-      writeSheet(sheetName, data);
-      return ContentService.createTextOutput(JSON.stringify({status: "success"}))
-        .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  async function toggleAutoSync() {
+    const nextVal = !cfg.auto_sync;
+    setCfg(c => ({ ...c, auto_sync: nextVal }));
+    try {
+      const res = await fetch(`${API}/api/settings/google-sheets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...cfg, auto_sync: nextVal }),
+      });
+      if (res.ok) {
+        fetchData();
+      }
+    } catch (e) {
+      console.error(e);
     }
-    return ContentService.createTextOutput(JSON.stringify({status: "error", message: "Invalid POST action"}))
-      .setMimeType(ContentService.MimeType.JSON);
-  } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({status: "error", message: err.toString()}))
-      .setMimeType(ContentService.MimeType.JSON);
   }
-}
 
-function readSheet(sheetName) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(sheetName);
-  if (!sheet) return [];
-  return sheet.getDataRange().getValues();
-}
+  async function loadLogs() {
+    try {
+      const res = await fetch(`${API}/datasource/logs?limit=100`);
+      if (res.ok) {
+        const data = await res.json();
+        setLogs(data);
+        setShowLogs(true);
+      } else {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to load logs");
+      }
+    } catch (e) {
+      alert(`Failed to load system logs: ${e.message}`);
+    }
+  }
 
-function writeSheet(sheetName, data) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(sheetName);
-  if (!sheet) {
-    sheet = ss.insertSheet(sheetName);
+  // Next Sync estimation
+  let nextSyncStr = "N/A";
+  if (status && status.auto_sync && status.last_sync_time !== "never") {
+    try {
+      // Find timestamp
+      const lastStr = status.last_sync_time.replace(" UTC", "");
+      const d = new Date(lastStr + "Z"); // Parse as UTC
+      d.setMinutes(d.getMinutes() + 5);
+      nextSyncStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + " (approx)";
+    } catch (e) {
+      nextSyncStr = "Every 5 mins";
+    }
+  } else if (cfg.auto_sync) {
+    nextSyncStr = "Every 5 mins";
+  } else {
+    nextSyncStr = "Disabled (Manual Only)";
   }
-  sheet.clear();
-  if (data && data.length > 0) {
-    sheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+
+  // Google status badge styling
+  let statusColor = "#d97706"; // Amber (Config Needed)
+  let statusText = "Configuration Needed";
+  if (status) {
+    if (status.last_sync_status === "ok") {
+      statusColor = "#059669"; // Green (Connected)
+      statusText = "Connected & Active";
+    } else if (status.last_sync_status === "error") {
+      statusColor = "#dc2626"; // Red (Sync Error)
+      statusText = `Sync Error: ${status.last_sync_error || "Unknown error"}`;
+    }
   }
-}`;
+
+  const inp = {
+    padding: "10px 14px", border: "1px solid #d1d5db", borderRadius: 8,
+    fontSize: 13, outline: "none", width: "100%", background: "#fff",
+    color: "#111827", boxSizing: "border-box", transition: "border-color 0.15s ease",
+  };
+  const lbl = { fontSize: 12, fontWeight: 600, color: "#4b5563", marginBottom: 6, display: "block" };
 
   return (
     <>
-      <Section>🔗 Data Source — Google Sheets (via Apps Script)</Section>
+      <Section>⚙️ SpareAI Administration & Google Sheets Integration</Section>
 
-      {loadError && (
-        <div style={{
-          background: "#fef2f2", border: "1px solid #fca5a5",
-          borderRadius: 9, padding: "10px 16px", marginBottom: 16,
-          fontSize: 12, color: "#dc2626",
-        }}>
-          ⚠ Could not load saved config: {loadError}
+      {/* Overview Cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 20 }}>
+        {/* Status card */}
+        <div className="stat-card" style={{ borderLeft: `4px solid ${statusColor}` }}>
+          <span className="stat-label">Google Integration Status</span>
+          <span style={{ fontSize: 15, fontWeight: 700, color: statusColor, margin: "4px 0" }}>
+            {statusText}
+          </span>
+          <span className="stat-sub">
+            {status ? `Last Sync: ${status.last_sync_time}` : "Not synced yet"}
+          </span>
         </div>
-      )}
 
-      {/* How it works */}
-      <Card style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: "#111827", marginBottom: 8 }}>ℹ How It Works</div>
-        <ul style={{ fontSize: 12, color: "#6b7280", lineHeight: "1.8", paddingLeft: 20, margin: 0 }}>
-          <li>SpareAI reads and writes live data to Google Sheets via a secure <strong>Google Apps Script Web App</strong>.</li>
-          <li>Data is cached in-memory and automatically refreshed every <strong>5 minutes</strong>.</li>
-          <li>This connection runs inside your own Google Account context — no Service Account or GCP project setup required.</li>
-          <li>On failure, the previous cache remains active so dashboards stay available.</li>
-        </ul>
-      </Card>
+        {/* Rows card */}
+        <div className="stat-card">
+          <span className="stat-label">Data Volumes</span>
+          <span className="stat-value">{status ? status.row_count.toLocaleString() : 0}</span>
+          <span className="stat-sub">
+            Rows of historical consumption data
+          </span>
+        </div>
 
-      {/* Config form */}
-      <Card style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: "#111827", marginBottom: 20 }}>⚙ Apps Script Configuration</div>
-        {loading ? (
-          <div style={{ fontSize: 12, color: "#9ca3af", padding: "20px 0", textAlign: "center" }}>Loading saved config…</div>
-        ) : (
-          <form onSubmit={saveConfig}>
-            {/* Web App URL */}
-            <div style={{ marginBottom: 16 }}>
-              <label style={lbl}>Apps Script Web App URL <span style={{ color: "#ef4444" }}>*</span></label>
-              <input style={inp}
-                placeholder="https://script.google.com/macros/s/AKfycbz.../exec"
-                required
-                value={cfg.apps_script_url || ""}
-                onChange={e => setCfg(c => ({ ...c, apps_script_url: e.target.value }))} />
-              <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
-                The deployment URL obtained by deploying your script as a Web App (Access: Anyone).
-              </div>
-            </div>
+        {/* Model Card */}
+        <div className="stat-card">
+          <span className="stat-label">Production ML Model</span>
+          <span style={{ fontSize: 18, fontWeight: 700, color: "#111827", margin: "4px 0" }}>
+            {status && status.model_status.best_model ? status.model_status.best_model : "No active model"}
+          </span>
+          <span className="stat-sub">
+            {status && status.model_status.best_mae ? `MAE: ${status.model_status.best_mae} · Accuracy high` : "Training required"}
+          </span>
+        </div>
 
-            {/* Sheet names */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 20 }}>
-              <div>
-                <label style={lbl}>Consumption Sheet</label>
-                <input style={inp} value={cfg.consumption_sheet}
-                  onChange={e => setCfg(c => ({ ...c, consumption_sheet: e.target.value }))} />
-              </div>
-              <div>
-                <label style={lbl}>Inventory Sheet</label>
-                <input style={inp} value={cfg.inventory_sheet}
-                  onChange={e => setCfg(c => ({ ...c, inventory_sheet: e.target.value }))} />
-              </div>
-              <div>
-                <label style={lbl}>ABC Master Sheet</label>
-                <input style={inp} value={cfg.abc_sheet}
-                  onChange={e => setCfg(c => ({ ...c, abc_sheet: e.target.value }))} />
-              </div>
-            </div>
+        {/* Auto Sync status */}
+        <div className="stat-card">
+          <span className="stat-label">Background Sync</span>
+          <span style={{ fontSize: 18, fontWeight: 700, color: cfg.auto_sync ? "#059669" : "#6b7280", margin: "4px 0" }}>
+            {cfg.auto_sync ? "ON (Every 5m)" : "OFF (Manual Only)"}
+          </span>
+          <span className="stat-sub">
+            Next: {nextSyncStr}
+          </span>
+        </div>
+      </div>
 
-            {/* Actions */}
-            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-              <button type="submit" style={{
-                padding: "10px 26px", background: "#2563eb", color: "#fff",
-                border: "none", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer",
-                boxShadow: "0 2px 8px rgba(37,99,235,0.28)",
-              }}>
-                💾 Save Configuration
-              </button>
-              <button type="button" onClick={triggerSync} disabled={syncing} style={{
-                padding: "10px 26px",
-                background: syncing ? "#9ca3af" : "#059669",
-                color: "#fff", border: "none", borderRadius: 8,
-                fontSize: 13, fontWeight: 700,
-                cursor: syncing ? "not-allowed" : "pointer",
-                boxShadow: syncing ? "none" : "0 2px 8px rgba(5,150,105,0.28)",
-              }}>
-                {syncing ? "⏳ Syncing…" : "🔄 Sync Now"}
-              </button>
+      {/* Main Grid split */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, alignItems: "start", marginBottom: 20 }}>
+        {/* Left Side: Save Config Form */}
+        <Card style={{ padding: 24 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 18, borderBottom: "1px solid #f3f4f6", paddingBottom: 10 }}>
+            ⚙️ Connection & Source Settings
+          </div>
+          
+          {loading ? (
+            <div style={{ fontSize: 12, color: "#9ca3af", padding: "20px 0", textAlign: "center" }}>Loading saved config…</div>
+          ) : (
+            <form onSubmit={saveConfig}>
+              {/* Spreadsheet ID */}
+              <div style={{ marginBottom: 14 }}>
+                <label style={lbl}>Google Spreadsheet ID <span style={{ color: "#ef4444" }}>*</span></label>
+                <input style={inp}
+                  placeholder="e.g. 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+                  required
+                  value={cfg.spreadsheet_id}
+                  onChange={e => setCfg(c => ({ ...c, spreadsheet_id: e.target.value }))} />
+                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
+                  The ID from the Google Sheet URL: .../spreadsheets/d/<strong>SPREADSHEET_ID</strong>/edit
+                </div>
+              </div>
+
+              {/* Core Worksheets */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+                <div>
+                  <label style={lbl}>Inventory Worksheet Name</label>
+                  <input style={inp} value={cfg.inventory_sheet}
+                    onChange={e => setCfg(c => ({ ...c, inventory_sheet: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={lbl}>ABC Master Worksheet Name</label>
+                  <input style={inp} value={cfg.abc_sheet}
+                    onChange={e => setCfg(c => ({ ...c, abc_sheet: e.target.value }))} />
+                </div>
+              </div>
+
+              {/* Intervals */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+                <div style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                  <label style={lbl}>Auto Sync Background</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, height: 40 }}>
+                    <button type="button" onClick={toggleAutoSync} style={{
+                      padding: "6px 12px",
+                      background: cfg.auto_sync ? "#059669" : "#e5e7eb",
+                      color: cfg.auto_sync ? "#fff" : "#4b5563",
+                      border: "none", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 700
+                    }}>
+                      {cfg.auto_sync ? "🟢 Enabled" : "🔴 Disabled"}
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label style={lbl}>ML Retraining Interval (Hours)</label>
+                  <input type="number" min={1} max={24} style={inp} value={cfg.training_interval_hours}
+                    onChange={e => setCfg(c => ({ ...c, training_interval_hours: parseInt(e.target.value) || 2 }))} />
+                </div>
+              </div>
+
+              {/* Service Account JSON */}
+              <div style={{ marginBottom: 20 }}>
+                <label style={lbl}>Service Account JSON Credentials <span style={{ color: "#ef4444" }}>*</span></label>
+                <textarea rows={6}
+                  style={{ ...inp, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, resize: "vertical" }}
+                  placeholder={`{
+  "type": "service_account",
+  "project_id": "...",
+  "private_key": "...",
+  ...
+}`}
+                  value={cfg.credentials_json}
+                  onChange={e => setCfg(c => ({ ...c, credentials_json: e.target.value }))} />
+                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
+                  Upload or paste your downloaded Google Cloud Service Account JSON credentials key file.
+                </div>
+              </div>
+
+              {/* Form actions */}
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <button type="submit" className="btn btn-primary" style={{ padding: "10px 20px", borderRadius: 8, fontWeight: 600 }}>
+                  💾 Save Configuration
+                </button>
+                <button type="button" onClick={triggerTest} disabled={testing} style={{
+                  padding: "10px 20px", background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db",
+                  borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: testing ? "not-allowed" : "pointer"
+                }}>
+                  {testing ? "⏳ Testing..." : "🔌 Test Connection"}
+                </button>
+              </div>
+              
               {saveMsg && (
-                <span style={{
-                  fontSize: 12, fontWeight: 600,
-                  color: saveMsg.startsWith("✅") ? "#059669" : "#dc2626",
-                }}>{saveMsg}</span>
+                <div style={{
+                  marginTop: 12, padding: "8px 12px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+                  background: saveMsg.startsWith("✅") ? "#f0fdf4" : "#fef2f2",
+                  color: saveMsg.startsWith("✅") ? "#166534" : "#dc2626",
+                  border: `1px solid ${saveMsg.startsWith("✅") ? "#86efac" : "#fca5a5"}`
+                }}>
+                  {saveMsg}
+                </div>
+              )}
+              
+              {testResult && (
+                <div style={{
+                  marginTop: 12, padding: "8px 12px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+                  background: testResult.status === "success" ? "#f0fdf4" : "#fef2f2",
+                  color: testResult.status === "success" ? "#166534" : "#dc2626",
+                  border: `1px solid ${testResult.status === "success" ? "#86efac" : "#fca5a5"}`
+                }}>
+                  {testResult.msg}
+                </div>
+              )}
+            </form>
+          )}
+        </Card>
+
+        {/* Right Side: System Information & Operations Panel */}
+        <Card style={{ padding: 24 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 18, borderBottom: "1px solid #f3f4f6", paddingBottom: 10 }}>
+            🖥️ System Stats & Operations
+          </div>
+
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginBottom: 20 }}>
+            <tbody>
+              {[
+                ["Google Status", status ? (status.last_sync_status === "ok" ? "🟢 Connected" : `🔴 Sync Error: ${status.last_sync_error || "Unknown"}`) : "🟡 Config Pending"],
+                ["Spreadsheet Name", status ? status.spreadsheet_title || "N/A" : "N/A"],
+                ["Spreadsheet ID", status ? (status.spreadsheet_id ? status.spreadsheet_id.slice(0, 15) + "..." : "N/A") : "N/A"],
+                ["Rows Loaded", status ? status.row_count.toLocaleString() : "N/A"],
+                ["Detected Yearly Sheets", status && status.detected_sheets && status.detected_sheets.length ? status.detected_sheets.join(", ") : "None"],
+                ["Inventory Sheet", cfg.inventory_sheet],
+                ["ABC Master Sheet", cfg.abc_sheet],
+                ["Last Google Sync", status ? status.last_sync_time : "Never"],
+                ["Next Google Sync", nextSyncStr],
+                ["ML Model Version", status && status.model_status.best_model ? status.model_status.best_model : "N/A"],
+                ["Training MAE", status && status.model_status.best_mae ? status.model_status.best_mae : "N/A"],
+                ["Last Training Time", status && status.model_status.trained_at ? new Date(status.model_status.trained_at).toLocaleString() : "Never"],
+                ["Service Account Email", status && status.service_account_email ? status.service_account_email : "N/A"],
+              ].map(([lbl, val], idx) => (
+                <tr key={idx} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                  <td style={{ padding: "8px 0", fontWeight: 600, color: "#4b5563", width: "40%" }}>{lbl}</td>
+                  <td style={{ padding: "8px 0", color: "#111827", wordBreak: "break-all", fontFamily: lbl.includes("ID") || lbl.includes("Email") ? "monospace" : "inherit" }}>{val}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* Quick Operations Button Bar */}
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button onClick={triggerSync} disabled={syncing} style={{
+              flex: 1, padding: "10px 14px", background: "#059669", color: "#fff", border: "none", borderRadius: 8,
+              fontSize: 13, fontWeight: 700, cursor: syncing ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6
+            }}>
+              {syncing ? "⏳ Syncing..." : "🔄 Sync Now"}
+            </button>
+            <button onClick={triggerTrain} disabled={training} style={{
+              flex: 1, padding: "10px 14px", background: "#2563eb", color: "#fff", border: "none", borderRadius: 8,
+              fontSize: 13, fontWeight: 700, cursor: training ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6
+            }}>
+              {training ? "⏳ Training..." : "🧠 Train Model"}
+            </button>
+            <button onClick={loadLogs} style={{
+              flex: 1, padding: "10px 14px", background: "#4b5563", color: "#fff", border: "none", borderRadius: 8,
+              fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6
+            }}>
+              📋 View System Logs
+            </button>
+          </div>
+
+          {syncMsg && (
+            <div style={{
+              marginTop: 12, padding: "10px 14px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+              background: syncMsg.startsWith("✅") ? "#f0fdf4" : "#fef2f2",
+              color: syncMsg.startsWith("✅") ? "#166534" : "#dc2626",
+              border: `1px solid ${syncMsg.startsWith("✅") ? "#86efac" : "#fca5a5"}`
+            }}>
+              {syncMsg}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* System Logs Modal */}
+      {showLogs && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh",
+          backgroundColor: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center",
+          justifyContent: "center", zIndex: 1000, padding: 20, boxSizing: "border-box"
+        }}>
+          <div style={{
+            backgroundColor: "#fff", borderRadius: 12, width: "100%", maxWidth: 800,
+            maxHeight: "85vh", display: "flex", flexDirection: "column", padding: 24,
+            boxShadow: "0 10px 25px rgba(0,0,0,0.15)"
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>📋 System Logs (Structured API Logs)</div>
+              <button onClick={() => setShowLogs(false)} style={{
+                background: "transparent", border: "none", fontSize: 18, color: "#9ca3af", cursor: "pointer"
+              }}>✕</button>
+            </div>
+
+            <div style={{
+              flex: 1, overflowY: "auto", background: "#0f172a", borderRadius: 8,
+              padding: 16, fontFamily: "var(--font-mono)", fontSize: 11, color: "#94a3b8"
+            }}>
+              {logs.length === 0 ? (
+                <div style={{ color: "#475569", textAlign: "center", padding: "20px 0" }}>No log entries found.</div>
+              ) : (
+                logs.map((log, idx) => {
+                  let badgeBg = "#475569";
+                  if (log.status === "ok") badgeBg = "#15803d";
+                  else if (log.status === "error") badgeBg = "#b91c1c";
+
+                  return (
+                    <div key={idx} style={{ borderBottom: "1px solid #1e293b", padding: "6px 0", lineHeight: 1.6 }}>
+                      <span style={{ color: "#38bdf8" }}>[{new Date(log.timestamp).toLocaleTimeString()}]</span>{" "}
+                      <span style={{ background: badgeBg, color: "#fff", padding: "1px 6px", borderRadius: 4, fontSize: 9, fontWeight: 700, marginRight: 6 }}>
+                        {log.category.toUpperCase()}
+                      </span>
+                      <span style={{ color: log.status === "error" ? "#f43f5e" : "#f8fafc" }}>
+                        {log.message}
+                      </span>
+                      {log.duration > 0 && <span style={{ color: "#64748b", marginLeft: 8 }}>({log.duration}s)</span>}
+                    </div>
+                  );
+                })
               )}
             </div>
-          </form>
-        )}
-      </Card>
 
-      {/* Live progress during sync */}
-      {syncing && syncProgress && (
-        <div style={{
-          background: "#eff6ff", border: "1px solid #93c5fd",
-          borderRadius: 9, padding: "12px 16px", marginBottom: 12,
-          fontSize: 13, fontWeight: 600, color: "#1d4ed8",
-          display: "flex", alignItems: "center", gap: 10,
-        }}>
-          <span style={{ display: "inline-block", width: 14, height: 14, border: "2px solid #3b82f6", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-          {syncProgress}
-        </div>
-      )}
-
-      {/* Sync feedback */}
-      {syncMsg && (
-        <div style={{
-          background: syncMsg.startsWith("✅") ? "#f0fdf4" : "#fef2f2",
-          border: `1px solid ${syncMsg.startsWith("✅") ? "#86efac" : "#fca5a5"}`,
-          borderRadius: 9, padding: "12px 16px", marginBottom: 20,
-          fontSize: 13, fontWeight: 600,
-          color: syncMsg.startsWith("✅") ? "#166534" : "#dc2626",
-        }}>
-          {syncMsg}
-        </div>
-      )}
-
-      {/* Script template reveal */}
-      <Card style={{ marginBottom: 20 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: showScript ? 12 : 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>
-            📄 Google Apps Script Code Template
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowScript(!showScript)}
-            style={{
-              padding: "5px 12px", background: "#f3f4f6", border: "1px solid #d1d5db",
-              borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", color: "#374151"
-            }}
-          >
-            {showScript ? "Hide Script" : "Show Script Code"}
-          </button>
-        </div>
-        {showScript && (
-          <div>
-            <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10 }}>
-              Copy the code below, open your Google Sheet, go to <strong>Extensions &gt; Apps Script</strong>, paste this code, and deploy it as a Web App.
-            </div>
-            <textarea
-              readOnly
-              rows={12}
-              onClick={(e) => e.target.select()}
-              style={{
-                ...inp,
-                fontFamily: "'IBM Plex Mono', monospace",
-                fontSize: 11,
-                background: "#f9fafb",
-                cursor: "text"
-              }}
-              value={scriptTemplate}
-            />
-          </div>
-        )}
-      </Card>
-
-      {/* Setup Checklist */}
-      <Card>
-        <div style={{ fontSize: 13, fontWeight: 700, color: "#111827", marginBottom: 14 }}>📋 Setup Checklist</div>
-        {[
-          ["Open your Google Spreadsheet", null],
-          ["Go to Extensions > Apps Script and clear any existing code", null],
-          ["Copy the Apps Script code template above and paste it into the editor", null],
-          ["Click Deploy > New deployment at the top right", null],
-          ["Select Web app as the type, set Execute as: 'Me', and Who has access: 'Anyone'", null],
-          ["Click Deploy, authorize permissions, and copy the Web App URL", null],
-          ["Paste the URL into the Apps Script Configuration above and click Save", null],
-        ].map(([step, link], i) => (
-          <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 12 }}>
-            <div style={{
-              minWidth: 24, height: 24, borderRadius: "50%", background: "#2563eb",
-              color: "#fff", display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 11, fontWeight: 800, flexShrink: 0,
-            }}>{i + 1}</div>
-            <div style={{ fontSize: 12, color: "#374151", lineHeight: 1.7 }}>
-              {step}
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+              <button onClick={() => setShowLogs(false)} style={{
+                padding: "8px 16px", background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db",
+                borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer"
+              }}>
+                Close
+              </button>
             </div>
           </div>
-        ))}
-      </Card>
+        </div>
+      )}
     </>
   );
 }

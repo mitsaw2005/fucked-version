@@ -1,0 +1,39 @@
+{
+  "best_model": "RandomForest",
+  "best_mae": 42.0159,
+  "best_rmse": 52.8443,
+  "best_mape": 0.0728,
+  "features": [
+    "Material",
+    "lag_1",
+    "lag_3",
+    "rolling_3",
+    "rolling_6",
+    "month",
+    "quarter",
+    "year"
+  ],
+  "all_results": {
+    "XGBoost": 46.8324,
+    "LightGBM": 46.8124,
+    "RandomForest": 42.0159,
+    "ExtraTrees": 44.3267,
+    "Ridge": 47.1302
+  },
+  "all_results_rmse": {
+    "XGBoost": 59.4522,
+    "LightGBM": 59.4429,
+    "RandomForest": 52.8443,
+    "ExtraTrees": 55.8993,
+    "Ridge": 59.2497
+  },
+  "all_results_mape": {
+    "XGBoost": 0.082,
+    "LightGBM": 0.0821,
+    "RandomForest": 0.0728,
+    "ExtraTrees": 0.0768,
+    "Ridge": 0.0812
+  },
+  "trained_at": "2026-06-19T08:16:58.684860",
+  "row_count": 18442
+}

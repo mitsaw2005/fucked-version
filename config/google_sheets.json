@@ -1,6 +1,10 @@
 {
-  "apps_script_url": "https://script.google.com/macros/s/AKfycbzBNWChsayB-tFi6b3LohObdIcqX5VHIWQOYtFixKVz7BmVaSHvWqUHHfDOeI-__adP/exec",
+  "spreadsheet_id": "1icu0o8gs1dQ6GlsZago3yzJWEU3_9FfUvacWxqSCmC0",
   "consumption_sheet": "Main",
   "inventory_sheet": "Inventory",
-  "abc_sheet": "ABC Master"
+  "abc_sheet": "ABC Master",
+  "service_account_path": "config/service_account.json",
+  "detected_sheets": [],
+  "auto_sync": true,
+  "training_interval_hours": 2
 }

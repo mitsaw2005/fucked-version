@@ -14,7 +14,7 @@ from backend.core import globals as G
 from backend.services import cache_service
 from backend.services.recommendation_engine import (
     available_years, latest_year, filter_by_year,
-    recommendation_engine, fmt,
+    recommendation_engine, recommend_for_materials, fmt,
 )
 
 _CACHE_KEY = "dashboard::init"
@@ -180,30 +180,30 @@ def get_shop_monthly(year: Optional[int] = None, shop: Optional[str] = None) -> 
 
 def get_critical_alerts(shop: Optional[str] = None) -> list:
     year_df, _ = _year_shop_slice(None, shop)
+    if year_df.empty:
+        return []
+    mats = sorted(year_df["Material"].unique().tolist())
+    recs = recommend_for_materials(mats, shop=shop)
+
     alerts = []
-    mats = sorted(year_df["Material"].unique().tolist()) if not year_df.empty else []
-    for m in mats:
-        try:
-            rec = recommendation_engine(m, shop=shop)
-            if rec["risk"] in ("High", "Medium"):
-                alerts.append({
-                    "material":       rec["material"],
-                    "shop":           rec["shop"],
-                    "abc_class":      rec["abc_class"],
-                    "risk":           rec["risk"],
-                    "action":         rec["order"]["action"],
-                    "order_qty":      rec["order"]["recommended_qty"],
-                    "reorder_by":     rec["lead_time"]["reorder_by"],
-                    "runout_date":    rec["lead_time"]["runout_date"],
-                    "days_to_runout": rec["lead_time"]["days_to_runout"],
-                    "already_late":   rec["lead_time"]["already_late"],
-                    "lead_time":      rec["lead_time"]["total"],
-                    "alert":          rec["alert"],
-                    "current_stock":  rec["inventory"]["current_stock"],
-                    "forecast":       rec["forecast"]["predicted_next_month"],
-                })
-        except Exception:
-            pass
+    for rec in recs:
+        if rec["risk"] in ("High", "Medium"):
+            alerts.append({
+                "material":       rec["material"],
+                "shop":           rec["shop"],
+                "abc_class":      rec["abc_class"],
+                "risk":           rec["risk"],
+                "action":         rec["order"]["action"],
+                "order_qty":      rec["order"]["recommended_qty"],
+                "reorder_by":     rec["lead_time"]["reorder_by"],
+                "runout_date":    rec["lead_time"]["runout_date"],
+                "days_to_runout": rec["lead_time"]["days_to_runout"],
+                "already_late":   rec["lead_time"]["already_late"],
+                "lead_time":      rec["lead_time"]["total"],
+                "alert":          rec["alert"],
+                "current_stock":  rec["inventory"]["current_stock"],
+                "forecast":       rec["forecast"]["predicted_next_month"],
+            })
     return alerts
 
 
@@ -214,13 +214,7 @@ def get_procurement_summary(shop: Optional[str] = None) -> list:
     if year_df.empty or "Material" not in year_df.columns:
         return []
     mats = sorted(year_df["Material"].unique().tolist())
-    out = []
-    for m in mats:
-        try:
-            out.append(recommendation_engine(m, shop=shop))
-        except Exception:
-            pass
-    return out
+    return recommend_for_materials(mats, shop=shop)
 
 
 # ── Forecast engine summary (Developer tab) ───────────────────────────────

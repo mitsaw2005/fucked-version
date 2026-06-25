@@ -74,9 +74,8 @@ def _build_features(qty_series, encoded, target_date, feat_cols):
     }])[feat_cols]
 
 
-def _recursive_ml_forecast(material: str, horizon_days: int) -> dict:
-    df = _get_df()
-    mdf = df[df["Material"] == material].sort_values("pstng date")
+def _recursive_ml_forecast(material: str, mdf: pd.DataFrame, horizon_days: int) -> dict:
+    mdf = mdf.sort_values("pstng date")
     if mdf.empty:
         raise ValueError(f"Material '{material}' not found")
 
@@ -112,9 +111,8 @@ def _recursive_ml_forecast(material: str, horizon_days: int) -> dict:
     }
 
 
-def _fallback_forecast(material: str, horizon_days: int) -> dict:
-    df  = _get_df()
-    mdf = df[df["Material"] == material].sort_values("pstng date")
+def _fallback_forecast(material: str, mdf: pd.DataFrame, horizon_days: int) -> dict:
+    mdf = mdf.sort_values("pstng date")
     if mdf.empty:
         raise ValueError(f"Material '{material}' not found")
     months  = max(1, int(round(horizon_days / 30.0)))
@@ -136,9 +134,7 @@ def _fallback_forecast(material: str, horizon_days: int) -> dict:
 
 # ── Supporting enrichment helpers ────────────────────────────────────
 
-def _get_material_meta(material: str, shop: Optional[str]) -> dict:
-    df  = _get_df()
-    mdf = df[df["Material"] == material]
+def _get_material_meta(mdf: pd.DataFrame, shop: Optional[str]) -> dict:
     if shop:
         s = mdf[mdf["Shop"] == shop]
         if not s.empty:
@@ -189,31 +185,38 @@ def _get_active_year_consumption(mdf, active_year) -> dict:
 
 # ── Main recommendation engine ───────────────────────────────────────
 
-def recommendation_engine(material: str, horizon_days: int = 30, shop: Optional[str] = None) -> dict:
+def recommendation_engine(material: str, horizon_days: int = 30, shop: Optional[str] = None,
+                           mdf: Optional[pd.DataFrame] = None, active_year: Optional[int] = None) -> dict:
     """
     Cached single source of truth for forecasts and procurement recommendations.
+
+    `mdf`, if given, is the rows for this material already sliced out of the
+    full dataframe by the caller (see recommend_for_materials below) — lets a
+    batch caller avoid re-fetching/re-filtering the full cached dataframe once
+    per material.
     """
     cache_key = f"rec::{material}::{horizon_days}::{shop}"
     cached = cache_service.get(cache_key)
     if cached is not None:
         return cached
 
-    df   = _get_df()
-    mdf  = df[df["Material"] == material].copy()
+    if mdf is None:
+        df  = _get_df()
+        mdf = df[df["Material"] == material]
     if mdf.empty:
         raise ValueError(f"Material '{material}' not found")
 
     fallback_used = False
     try:
-        fc = _recursive_ml_forecast(material, horizon_days)
+        fc = _recursive_ml_forecast(material, mdf, horizon_days)
     except Exception:
-        fc = _fallback_forecast(material, horizon_days)
+        fc = _fallback_forecast(material, mdf, horizon_days)
         fallback_used = True
 
     predicted        = fc["predicted_next_month"]
     horizon_forecast = fc["horizon_forecast"]
 
-    m_meta    = _get_material_meta(material, shop)
+    m_meta    = _get_material_meta(mdf, shop)
     abc       = m_meta.get("abc", "C")
     inventory = m_meta.get("inventory", 1500)
     val_type  = m_meta.get("val_type", 1)
@@ -225,7 +228,8 @@ def recommendation_engine(material: str, horizon_days: int = 30, shop: Optional[
     total_lt_min = lead_time["min"] + inhouse_time["min"]
     total_lt_max = lead_time["max"] + inhouse_time["max"]
 
-    active_year = latest_year()
+    if active_year is None:
+        active_year = latest_year()
     year_stats  = _get_active_year_consumption(mdf, active_year)
     last_month  = year_stats["last_month"]
 
@@ -310,3 +314,37 @@ def recommendation_engine(material: str, horizon_days: int = 30, shop: Optional[
 
     cache_service.set(cache_key, result)
     return result
+
+
+def recommend_for_materials(materials: list, horizon_days: int = 30, shop: Optional[str] = None) -> list:
+    """
+    Batch version of recommendation_engine() — fetches and groups the cached
+    dataframe once for the whole list instead of once per material, which is
+    what makes /critical-alerts and /procurement-summary tractable over a
+    full material list instead of taking minutes.
+    """
+    # Note: deliberately not shop-filtered here — the forecast itself is based
+    # on a material's full consumption history across all shops, same as the
+    # single-material path; `shop` only narrows the metadata lookup below.
+    df = _get_df()
+    # NB: dict(df.groupby(...)) misfires on pandas 2.x — GroupBy exposes a
+    # `.keys` attribute holding the grouping key ("Material"), which dict()'s
+    # mapping-protocol detection calls as if it were a method.
+    groups = {k: v for k, v in df.groupby("Material")}
+
+    # Computed once here instead of inside recommendation_engine(), which
+    # would otherwise call latest_year() -> _get_df() (another full copy)
+    # on every single material.
+    years = sorted(df["pstng date"].dt.year.dropna().astype(int).unique().tolist()) if not df.empty else []
+    active_year = years[-1] if years else None
+
+    results = []
+    for m in materials:
+        mdf = groups.get(m)
+        if mdf is None:
+            continue
+        try:
+            results.append(recommendation_engine(m, horizon_days=horizon_days, shop=shop, mdf=mdf, active_year=active_year))
+        except Exception:
+            pass
+    return results

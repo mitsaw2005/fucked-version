@@ -1,10 +1,22 @@
 {
-  "spreadsheet_id": "1icu0o8gs1dQ6GlsZago3yzJWEU3_9FfUvacWxqSCmC0",
+  "spreadsheet_id": "1icu0o8gs1dQ6GIsZago3yzJWEU3_9FfUvacWxqSCmC0",
   "consumption_sheet": "Main",
   "inventory_sheet": "Inventory",
   "abc_sheet": "ABC Master",
   "service_account_path": "config/service_account.json",
-  "detected_sheets": [],
+  "detected_sheets": [
+    "16-17",
+    "17-18",
+    "18-19",
+    "19-20",
+    "20-21",
+    "21-22",
+    "22-23",
+    "23-24",
+    "24-25",
+    "25-26",
+    "26-27"
+  ],
   "auto_sync": true,
   "training_interval_hours": 2
 }

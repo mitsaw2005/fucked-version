@@ -18,6 +18,7 @@ models/*.joblib
 data/*.xlsx
 data/*.csv
 data/*.xls
+data/*.pkl
 
 # Google credentials — NEVER commit these
 config/service_account.json

@@ -138,6 +138,14 @@ def _build_dataframe(cfg: dict, notify: Callable) -> pd.DataFrame:
     if rename_map:
         df_cons = df_cons.rename(columns=rename_map)
 
+    # gspread auto-numericises numeric-looking cells, turning part numbers like
+    # "100000258" into the int 100000258. Force back to string so identifiers
+    # match consistently across merges and against string path params (e.g.
+    # /forecast/{material}) the same way they would from a text-formatted
+    # Excel column.
+    if "PartNumber" in df_cons.columns:
+        df_cons["PartNumber"] = df_cons["PartNumber"].astype(str).str.strip()
+
     # Standardize/validate core columns in consumption
     if "pstng date" in df_cons.columns:
         # Google Sheets returns dates as display text (e.g. "25.11.2016", day-first),
@@ -187,6 +195,8 @@ def _build_dataframe(cfg: dict, notify: Callable) -> pd.DataFrame:
                 rename_inv[col] = "Machine Name"
         if rename_inv:
             df_inv = df_inv.rename(columns=rename_inv)
+        if "PartNumber" in df_inv.columns:
+            df_inv["PartNumber"] = df_inv["PartNumber"].astype(str).str.strip()
     else:
         notify(f"  ⚠ Inventory worksheet '{inv_name}' not found — inventory levels will use fallback estimates.")
 
@@ -201,6 +211,8 @@ def _build_dataframe(cfg: dict, notify: Callable) -> pd.DataFrame:
                 rename_abc[col] = "ABC_Class"
         if rename_abc:
             df_abc = df_abc.rename(columns=rename_abc)
+        if "PartNumber" in df_abc.columns:
+            df_abc["PartNumber"] = df_abc["PartNumber"].astype(str).str.strip()
 
     # Perform Merge
     df = df_cons

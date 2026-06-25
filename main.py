@@ -22,6 +22,7 @@ from backend.api.model_api import router as model_router
 from backend.api.service_account_api import router as sa_router
 from backend.api.sync_api import router as sync_router
 from backend.api.logs_api import router as logs_router
+from backend.api.legacy_dashboard import router as legacy_dashboard_router
 
 app = FastAPI(title="SpareAI — Tata Motors", version="6.0.0")
 
@@ -42,6 +43,7 @@ app.include_router(model_router)
 app.include_router(sa_router)
 app.include_router(sync_router)
 app.include_router(logs_router)
+app.include_router(legacy_dashboard_router)
 
 # Register startup handler
 @app.on_event("startup")

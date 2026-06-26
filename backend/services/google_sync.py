@@ -163,12 +163,20 @@ def _build_dataframe(cfg: dict, notify: Callable) -> pd.DataFrame:
         raise ValueError("Missing Quantity column in yearly worksheets.")
     df_cons["Quantity"] = pd.to_numeric(df_cons["Quantity"], errors="coerce").fillna(0.0)
 
-    # Filter consumption movements (Mvt 261/262) and handle returns
-    if "Mvt" in df_cons.columns:
-        df_cons = df_cons[df_cons["Mvt"].isin([261, 262])].copy()
-        df_cons.loc[df_cons["Mvt"] == 262, "Quantity"] *= -1
-    else:
-        notify("  ⚠ 'Mvt' column not found in yearly sheets — skipping movement type filtering.")
+    # Consumption movements (gross out from inventory)
+    CONSUMPTION_MVTS = [261, 641, 702, 901, 902]
+
+    # Return movements (material coming BACK, subtract from consumption)
+    RETURN_MVTS = [262, 642]
+
+    # Gross — for all display charts (Shop-wise, ABC donut, Top 10)
+    df_gross = df_cons[df_cons["Mvt"].isin(CONSUMPTION_MVTS)].copy()
+
+    # Net — for stock/procurement calculations only
+    df_consumption = df_cons[df_cons["Mvt"].isin(CONSUMPTION_MVTS)].copy()
+    df_returns = df_cons[df_cons["Mvt"].isin(RETURN_MVTS)].copy()
+    df_returns["Quantity"] *= -1
+    df_net = pd.concat([df_consumption, df_returns])
 
     # Load Inventory and ABC Master
     inv_name = cfg.get("inventory_sheet", "Inventory")

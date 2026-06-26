@@ -35,11 +35,23 @@ logger.addHandler(_fh)
 FEATURES = ["Material", "lag_1", "lag_3", "rolling_3", "rolling_6", "month", "quarter", "year"]
 TARGET   = "Quantity"
 
+# All valid consumption movement types
+CONSUMPTION_MVTS = [261, 641, 702, 901, 902]
+RETURN_MVTS      = [262, 642]
+ALL_MVTS         = CONSUMPTION_MVTS + RETURN_MVTS
+
 
 def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Monthly aggregation + lag/rolling feature engineering."""
     if "pstng date" not in df.columns or "Material" not in df.columns:
         raise ValueError("DataFrame missing required columns: 'pstng date', 'Material'")
+
+    # FIX 4: Only use positive consumption rows for training
+    # Returns (262, 642) should not teach the model negative consumption patterns
+    if "Mvt" in df.columns:
+        df = df[df["Mvt"].isin(CONSUMPTION_MVTS)].copy()
+    else:
+        df = df[df["Quantity"] > 0].copy()
 
     agg_dict = {"Quantity": "sum"}
     for col in ["ABC_Class", "Val Type", "Shop", "Machine Name", "Inventory_Qty"]:
@@ -111,6 +123,12 @@ def train_model(force: bool = False) -> dict:
         le = LabelEncoder()
         dataset["Material"] = le.fit_transform(dataset["Material"])
 
+        # FIX 3: Clip negative quantities before training
+        dataset[TARGET] = dataset[TARGET].clip(lower=0)
+
+        # FIX 2: Sort by TIME so test set = most recent months, not last materials alphabetically
+        dataset = dataset.sort_values("pstng date")
+
         X = dataset[FEATURES]
         y = dataset[TARGET]
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
@@ -145,8 +163,8 @@ def train_model(force: bool = False) -> dict:
             elapsed = (datetime.utcnow() - t0).total_seconds()
             logger.info(f"  Model NOT replaced (new MAE {new_mae} >= current {current_mae})")
             with G.state_lock:
-                G.is_model_stale   = False
-                G.retrain_running  = False
+                G.is_model_stale    = False
+                G.retrain_running   = False
                 G.retrain_last_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                 G.retrain_last_error = None
             return {
@@ -162,28 +180,30 @@ def train_model(force: bool = False) -> dict:
         joblib.dump(le, str(ENCODER_PATH))
 
         new_meta = {
-            "best_model":  best_name,
-            "best_mae":    new_mae,
-            "best_rmse":   results[best_name]["rmse"],
-            "best_mape":   results[best_name]["mape"],
-            "features":    FEATURES,
-            "all_results": {n: v["mae"]  for n, v in results.items()},
+            "best_model":       best_name,
+            "best_mae":         new_mae,
+            "best_rmse":        results[best_name]["rmse"],
+            "best_mape":        results[best_name]["mape"],
+            "features":         FEATURES,
+            "consumption_mvts": CONSUMPTION_MVTS,
+            "return_mvts":      RETURN_MVTS,
+            "all_results":      {n: v["mae"]  for n, v in results.items()},
             "all_results_rmse": {n: v["rmse"] for n, v in results.items()},
             "all_results_mape": {n: v["mape"] for n, v in results.items()},
-            "trained_at":  datetime.utcnow().isoformat(),
-            "row_count":   len(dataset),
+            "trained_at":       datetime.utcnow().isoformat(),
+            "row_count":        len(dataset),
         }
         META_PATH.write_text(json.dumps(new_meta, indent=2))
 
         # Hot-swap globals
         with G.state_lock:
-            G.model            = best_model
-            G.encoder          = le
-            G.meta             = new_meta
-            G.features         = FEATURES
-            G.is_model_stale   = False
-            G.retrain_running  = False
-            G.retrain_last_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            G.model              = best_model
+            G.encoder            = le
+            G.meta               = new_meta
+            G.features           = FEATURES
+            G.is_model_stale     = False
+            G.retrain_running    = False
+            G.retrain_last_time  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             G.retrain_last_error = None
 
         cache_service.invalidate_all()
